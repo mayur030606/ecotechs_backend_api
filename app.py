@@ -1,10 +1,12 @@
 import os
 import uuid
+import math
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from models import db, Report
+from models import db, Report, User
 from image_processing import compare_images
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 CORS(app)
@@ -13,7 +15,7 @@ CORS(app)
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///waste.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///waste_v2.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db.init_app(app)
@@ -21,9 +23,55 @@ db.init_app(app)
 with app.app_context():
     db.create_all()
 
+# Haversine formula to calculate distance between two lat/lon points in meters
+def calculate_distance(lat1, lon1, lat2, lon2):
+    R = 6371e3 # Earth radius in meters
+    phi1 = lat1 * math.pi / 180
+    phi2 = lat2 * math.pi / 180
+    delta_phi = (lat2 - lat1) * math.pi / 180
+    delta_lambda = (lon2 - lon1) * math.pi / 180
+    
+    a = math.sin(delta_phi / 2) * math.sin(delta_phi / 2) + \
+        math.cos(phi1) * math.cos(phi2) * \
+        math.sin(delta_lambda / 2) * math.sin(delta_lambda / 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
 @app.route('/')
 def home():
     return jsonify({"message": "EcoClean API Running"})
+
+@app.route('/api/register', methods=['POST'])
+def register():
+    data = request.json
+    if not data or 'username' not in data or 'password' not in data or 'role' not in data:
+        return jsonify({"error": "Missing required fields"}), 400
+        
+    if User.query.filter_by(username=data['username']).first():
+        return jsonify({"error": "Username already exists"}), 400
+        
+    hashed_password = generate_password_hash(data['password'])
+    new_user = User(
+        username=data['username'], 
+        password_hash=hashed_password, 
+        role=data['role']
+    )
+    db.session.add(new_user)
+    db.session.commit()
+    
+    return jsonify({"message": "User registered successfully", "user": new_user.to_dict()}), 201
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.json
+    if not data or 'username' not in data or 'password' not in data:
+        return jsonify({"error": "Missing username or password"}), 400
+        
+    user = User.query.filter_by(username=data['username']).first()
+    if not user or not check_password_hash(user.password_hash, data['password']):
+        return jsonify({"error": "Invalid username or password"}), 401
+        
+    return jsonify({"message": "Login successful", "user": user.to_dict()}), 200
 
 @app.route('/api/report', methods=['POST'])
 def create_report():
@@ -31,6 +79,13 @@ def create_report():
         return jsonify({"error": "No image part"}), 400
     
     file = request.files['image']
+    user_id = request.form.get('user_id')
+    lat = request.form.get('lat')
+    lon = request.form.get('lon')
+    
+    if not user_id or not lat or not lon:
+        return jsonify({"error": "Missing user_id, lat, or lon"}), 400
+        
     if file.filename == '':
         return jsonify({"error": "No selected file"}), 400
     
@@ -39,7 +94,12 @@ def create_report():
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
         
-        new_report = Report(user_image_path=filepath)
+        new_report = Report(
+            user_id=user_id,
+            user_lat=float(lat),
+            user_lon=float(lon),
+            user_image_path=filepath
+        )
         db.session.add(new_report)
         db.session.commit()
         
@@ -61,6 +121,13 @@ def verify_cleanup(report_id):
         return jsonify({"error": "No image part"}), 400
         
     file = request.files['image']
+    cleaner_id = request.form.get('cleaner_id')
+    lat = request.form.get('lat')
+    lon = request.form.get('lon')
+    
+    if not cleaner_id or not lat or not lon:
+        return jsonify({"error": "Missing cleaner_id, lat, or lon"}), 400
+        
     if file.filename == '':
         return jsonify({"error": "No selected file"}), 400
         
@@ -69,16 +136,25 @@ def verify_cleanup(report_id):
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
         
+        report.cleaner_id = cleaner_id
         report.cleaner_image_path = filepath
+        report.cleaner_lat = float(lat)
+        report.cleaner_lon = float(lon)
+        
+        # Calculate distance
+        distance = calculate_distance(report.user_lat, report.user_lon, report.cleaner_lat, report.cleaner_lon)
+        report.distance_meters = distance
+        
+        if distance > 100:
+            report.status = 'rejected'
+            db.session.commit()
+            return jsonify({
+                "error": f"Verification rejected: Cleaner is too far from report location ({int(distance)}m).",
+                "distance": distance
+            }), 400
         
         # Compare images
         difference, match_score = compare_images(report.user_image_path, report.cleaner_image_path)
-        
-        # Determine status (if difference is small, it implies it looks the same... wait!)
-        # Wait, if difference is high, it means it was cleaned.
-        # Let's keep the logic from before, but adjust for waste.
-        # Actually in the previous `app.py`, difference < 0.05 meant "no_change".
-        # So if difference >= 0.05, it means it's processed/cleaned.
         
         if difference < 0.05:
             report.status = 'rejected'
@@ -93,21 +169,20 @@ def verify_cleanup(report_id):
             "report": report.to_dict(),
             "comparison": {
                 "difference": difference,
-                "match_score": match_score
+                "match_score": match_score,
+                "distance_meters": distance
             }
         }), 200
 
 @app.route('/api/reports', methods=['GET'])
 def get_reports():
-    reports = Report.query.all()
+    user_id = request.args.get('user_id')
+    if user_id:
+        reports = Report.query.filter_by(user_id=user_id).all()
+    else:
+        reports = Report.query.all()
     return jsonify([report.to_dict() for report in reports]), 200
-
-@app.route('/api/reports/<report_id>', methods=['GET'])
-def get_report(report_id):
-    report = Report.query.get(report_id)
-    if not report:
-        return jsonify({"error": "Report not found"}), 404
-    return jsonify(report.to_dict()), 200
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
+
