@@ -86,6 +86,10 @@ def create_report():
     if not user_id or not lat or not lon:
         return jsonify({"error": "Missing user_id, lat, or lon"}), 400
         
+    user = User.query.get(user_id)
+    if not user or user.role != 'citizen':
+        return jsonify({"error": "Only registered citizens can report waste"}), 403
+        
     if file.filename == '':
         return jsonify({"error": "No selected file"}), 400
     
@@ -128,6 +132,13 @@ def verify_cleanup(report_id):
     if not cleaner_id or not lat or not lon:
         return jsonify({"error": "Missing cleaner_id, lat, or lon"}), 400
         
+    cleaner = User.query.get(cleaner_id)
+    if not cleaner or cleaner.role != 'cleaner':
+        return jsonify({"error": "Only registered cleaners can verify cleanups"}), 403
+        
+    if report.user_id == cleaner_id:
+        return jsonify({"error": "You cannot verify a task that you reported yourself"}), 403
+        
     if file.filename == '':
         return jsonify({"error": "No selected file"}), 400
         
@@ -147,9 +158,10 @@ def verify_cleanup(report_id):
         
         if distance > 100:
             report.status = 'rejected'
+            report.rejection_reason = f'Verification rejected: Cleaner is too far from report location ({int(distance)}m).'
             db.session.commit()
             return jsonify({
-                "error": f"Verification rejected: Cleaner is too far from report location ({int(distance)}m).",
+                "error": report.rejection_reason,
                 "distance": distance
             }), 400
         
@@ -158,8 +170,10 @@ def verify_cleanup(report_id):
         
         if difference < 0.05:
             report.status = 'rejected'
+            report.rejection_reason = 'Verification rejected: AI detected no meaningful change between before and after photos.'
         else:
             report.status = 'verified'
+            report.rejection_reason = None
             
         report.match_score = match_score
         db.session.commit()
@@ -183,6 +197,38 @@ def get_reports():
         reports = Report.query.all()
     return jsonify([report.to_dict() for report in reports]), 200
 
+@app.route('/api/rate/<report_id>', methods=['POST'])
+def rate_cleaner(report_id):
+    data = request.json
+    user_id = data.get('user_id')
+    rating = data.get('rating')
+
+    if not user_id or not rating:
+        return jsonify({"error": "Missing user_id or rating"}), 400
+
+    try:
+        rating = int(rating)
+        if rating < 1 or rating > 5:
+            return jsonify({"error": "Rating must be between 1 and 5"}), 400
+    except ValueError:
+        return jsonify({"error": "Rating must be a number"}), 400
+
+    report = Report.query.get(report_id)
+    if not report:
+        return jsonify({"error": "Report not found"}), 404
+
+    if report.user_id != user_id:
+        return jsonify({"error": "Only the citizen who created this report can rate it"}), 403
+
+    if report.status != 'verified':
+        return jsonify({"error": "You can only rate verified cleanups"}), 400
+
+    report.rating = rating
+    db.session.commit()
+
+    return jsonify({"message": "Rating saved successfully", "report": report.to_dict()}), 200
+
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
+
 
