@@ -31,8 +31,10 @@ class Report(db.Model):
     cleaner_image_path = db.Column(db.String(255), nullable=True)
     
     status = db.Column(db.String(50), default='pending') # pending, verified, rejected
+    rejection_reason = db.Column(db.String(255), nullable=True)
     match_score = db.Column(db.Float, nullable=True)
     distance_meters = db.Column(db.Float, nullable=True)
+    rating = db.Column(db.Integer, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     user = db.relationship('User', foreign_keys=[user_id])
@@ -50,7 +52,9 @@ class Report(db.Model):
             'cleaner_lon': self.cleaner_lon,
             'cleaner_image_path': self.cleaner_image_path,
             'status': self.status,
+            'rejection_reason': self.rejection_reason,
             'match_score': self.match_score,
             'distance_meters': self.distance_meters,
+            'rating': self.rating,
             'created_at': self.created_at.isoformat()
         }
