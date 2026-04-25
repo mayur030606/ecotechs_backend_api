@@ -1,0 +1,8 @@
+Flask
+Flask-Cors
+Flask-SQLAlchemy
+opencv-python-headless
+numpy
+Werkzeug
+requests
+gunicorn
